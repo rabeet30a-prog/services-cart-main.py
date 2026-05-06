@@ -159,3 +159,104 @@ def clear_cart():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8001, debug=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ # Purpose: Shopping cart API — stores and manages cart data in Redis
+# Tech stack: Flask + Redis + Gunicorn
+# How the cart works: 
+# 
+# Every user gets a UUID session ID stored in a browser cookie
+# Cart data is stored in Redis as a JSON blob with the key cart:{session_uuid}
+# Cart automatically expires after 7 days (configurable via CART_TTL env var)
+# No database needed — Redis handles everything in memory 
+
+# Redis Key Structure:
+# cart:a3f2c1d4-8b9e-4f2a-9c1d-3e5f7a8b2c4d
+  # --> {  
+        # "items": {
+          # "1": { "name": "Wireless Mouse", "price": 29.99, "qty": 2 },
+          # "3": { "name": "Keyboard",       "price": 89.99, "qty": 1 }
+        # },
+        # "total": 149.97
+      # }
+# All API Endpoints:
+# MethodEndpointWhat it doesGET/cartReturns the current user's cartPOST/cart/itemsAdds or increases quantity of an itemDELETE/cart/items/{id}Removes one specific itemDELETE/cartClears the entire cart (called after checkout)GET/healthzLiveness probe — always returns 200 OKGET/readyzReadiness probe — returns 503 if Redis is downGET/metricsPrometheus metrics scrape endpoint
+# POST /cart/items — Request body:
+# json{
+  # "product_id": 1,
+  # "price": 29.99,
+  # "name": "Wireless Mouse",
+  # "qty": 2
+# }
+# Session Cookie — Security flags:
+# pythonresp.set_cookie(
+  # SESSION_COOKIE,
+  # session_id,
+  # httponly=True,    # JS cannot read this cookie -- prevents XSS theft
+  # secure=True,      # Only sent over HTTPS -- never plain HTTP
+  # samesite="Lax",   # Blocks cross-site request forgery (CSRF)
+  # max_age=CART_TTL_SECS
+# )
+# 
+# HttpOnly — malicious JavaScript cannot steal the session ID
+# Secure — cookie never travels over unencrypted HTTP
+# SameSite=Lax — browser only sends cookie for same-site requests
+# 
+# Readiness Probe Logic:
+# python@app.get("/readyz")
+# def ready():
+    # try:
+        # r = get_redis()
+        # r.ping()              # Tries to reach Redis
+        # return {"status": "ready"}
+    # except Exception:
+        # return {"status": "unavailable"}, 503  # Returns 503 if Redis is down
+# 
+# If Redis is down, Kubernetes stops sending traffic to this pod
+# Pod stays up but is marked not ready — prevents requests from failing
+# 
+# Logging:
+# python# Structured JSON format — CloudWatch and FluentBit can parse this
+# {"time":"2024-01-15T10:30:00","level":"INFO","msg":"Added product 1 to cart a3f2c1..."}
+# 
+# Every cart operation is logged with session ID (truncated for privacy)
+####  JSON format means CloudWatch can filter and search logs easily
+# 
+####  Prometheus Metrics:
+#####  pythonmetrics = PrometheusMetrics(app, path="/metrics")
+
+#####  Automatically tracks request count, latency, and error rate per endpoint
+#####  Scraped by Prometheus every 30 seconds via the ServiceMonitor
+
+##### Input Validation:
+#####  pythonif not body or "product_id" not in body or "price" not in body:
+  #####  return {"error": "product_id and price are required"}, 400
+
+##### if qty < 1:
+   ##### return {"error": "qty must be >= 1"}, 400
+#####
+##### Rejects bad requests with clear error messages
+##### Prevents negative quantities or missing required fields
+
+##### Total Recalculation:
+#####  pythoncart["total"] = round(
+   ##### sum(item["price"] * item["qty"] for item in cart["items"].values()), 2
+##### )  #####
+
+##### Total is always recalculated server-side on every save #####
+ ##### Never trust the client to send the correct total   #####
+####  Rounded to 2 decimal places to avoid floating point issues  #####
